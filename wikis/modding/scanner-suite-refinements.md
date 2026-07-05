@@ -240,3 +240,25 @@ Net: roughly **+135 new / ~20 edited LOC**; auto-pickup feature body untouched.
 - Installed mod source: `mods/enabled/r6-scripts/fighting-gangs-allowed-reasonable-police/FightingGangsAllowed.reds` (classification precedent).
 - Mod precedents (scratchpad): `CNML.reds` (16040, DelayCallback loop + loot filters), `mod-26670.md` (Auto Tag Enemies — tags on hostility events, no visibility sweep).
 - Prior dossiers: `wikis/modding/plan-auto-tag-on-scan.md`, `plan-auto-pickup-on-scan.md`, `scan-mode-*.md` (hover fallback design lives there).
+
+---
+
+## 2026-07-06 whitelist fix (live-bug + spec change)
+
+**Bug report:** the auto-tag sweep tagged junk world objects — doors, fridges — that show no scanner tooltip.
+
+**Confirmed root cause (VERIFIED in decompile):** the QUEST category ran FIRST in `ST_IsAutoTagWhitelisted()`, before any class gating: `IsQuest() || GetAvailableClueIndex() >= 0`.
+- `Door` and `Fridge` both `extends InteractiveDevice` (door.swift:2, fridge.swift:2). `Device.IsQuest()` (deviceBase.swift:3264) returns `GetDevicePS().IsMarkedAsQuest()`, which reads `DeviceComponentPS.m_markAsQuest` — a **`protected persistent let`** (deviceComponentBase.swift:313–316). The quest system sets it on route/objective devices via `SetAsQuestImportantEvent` and frequently never clears it (clearing needs `m_autoToggleQuestMark` or a `m_factToDisableQuestMark` fact) — so stale quest-flagged doors/fridges, tooltip or not, passed the whitelist on the first line.
+- Secondary trigger in the same line: `GetAvailableClueIndex() >= 0` (scanningComponent.swift:596 — returns the index of any `isEnabled` clue; `FocusClueDefinition.isEnabled` defaults false, quest-enabled) fired on clue-flagged scene devices.
+- NOT the cause: the collectables trio. No Device overrides `IsContainer()`/`IsShardContainer()`/`IsItem()` — the only overrides are on loot classes (gameLootBag `!IsEmpty` with real-quantity init, lootContainers.swift:137/188; gameLootContainerBase `!IsEmpty() && !IsDisabled()`, :507; ItemObject `IsConnectedWithDrop`, item.swift:81; ShardCaseContainer true, shardCaseContainer.swift:47; ScriptedPuppet loot-quality, scriptedPuppet.swift:3726) — a Door/Fridge device returns GameObject-base `false` on all three. Residual hole noted: `gameLootContainerBase.IsEmpty()` is **native** (lootContainers.swift:602), its value before lazy loot-init is unverifiable from scripts, so an empty-from-start container could in principle pass `IsContainer()` — closed by the new final gate below.
+
+**New whitelist chain (four categories, as implemented):**
+1. Puppet branch unchanged — lootable corpses (`(IsDead() || IsIncapacitated()) && IsContainer()`) + safe-to-attack enemies (CanBeTagged → IsHostile / IsCharacterCyberpsycho / DoNotTriggerPrevention → crime-branch mirror → IsEnemy).
+2. Access points unchanged — `IsAccessPoint() && !GetDevicePS().IsBreached()`.
+3. **Turrets only** (cameras removed): `IsTurret() && !GetDevicePS().IsBroken()`. Cleanly separable: `GameObject.IsTurret()` base returns false (gameObject.swift:1367) and the **sole** override in the vanilla codebase is `SecurityTurret.IsTurret() -> true` (securityTurret.swift:88) — no camera or other SensorDevice inherits it, so turrets survive without dragging anything else in. `IsSensor()` (whole SensorDevice family incl. SurveillanceCamera) dropped.
+4. **Collectables tightened** (non-puppet): `!IsPlayerStash()` → vanilla classification trio `IsContainer() || IsShardContainer() || IsItem()` (class gate; all devices fail here even when quest-flagged, zero native calls spent) → **final gate: non-empty `TransactionSystem.GetItemList`** (vanilla precedent: the `HasLoot()` pattern). Chosen over class-gate-alone because native `IsEmpty()` pre-init semantics are unverifiable and the item list is exactly what drives the scanner loot tooltip. Cost: the GetItemList call runs only for objects that already passed the loot-class trio — the frustum sweep rarely returns loot classes at all (no TargetingComponents), and the hover channel evaluates once per crosshair acquisition; whitelist-fail still appends nothing to the seen-list, so an empty-now container is transparently re-checked later (same transient-empty semantics as auto-pickup).
+5. QUEST category deleted entirely (no `IsQuest()`, no clue-index tagging).
+
+**Clue-path audit:** `AutoTagTryOnce` previously called `ResolveFocusClues(true, target)` after `TagObject`. `ResolveFocusClues` (focusModeTagging.swift:138) queues a `TagLinkedCluekRequest` that propagates TAG state across the whole linked clue group — i.e. it could tag non-whitelisted clue-group members (quest doors) even after the quest category was removed. The call is now **removed from the auto-tag path**; manual middle-click (`OnActionWithOwner`) keeps the full vanilla cascade untouched. Quest progression unaffected — clue beats complete via the ScanningComponent inspection pipeline independent of tagging (§1.6).
+
+Compile: `scc -compile r6/scripts` clean, zero ScannerSuite warnings.
