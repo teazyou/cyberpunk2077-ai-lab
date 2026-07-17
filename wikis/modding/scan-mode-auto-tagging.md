@@ -132,3 +132,60 @@ protected cb func OnActionWithOwner(action: ListenerAction, consumer: ListenerAc
 - Local game files: `r6/config/inputContexts.xml` (`TagButton` → `Tag_Button` mapping)
 - Nexus pages (via r.jina.ai): [Auto Tag Enemies 26670](https://www.nexusmods.com/cyberpunk2077/mods/26670), [Ping Tags Enemies 9950](https://www.nexusmods.com/cyberpunk2077/mods/9950), [Aim Reveals (Tags) Enemies 14742](https://www.nexusmods.com/cyberpunk2077/mods/14742), [Tag and Hack 23654](https://www.nexusmods.com/cyberpunk2077/mods/23654), [Ping Tags Enemies CET 14256](https://www.nexusmods.com/cyberpunk2077/mods/14256)
 - Reference (not fetched, for follow-up): NativeDB https://nativedb.red4ext.com (class `gameScanningController`), CDPR modding wiki https://wiki.redmodding.org
+
+## 2026-07-06 — auto-tag narrowed to collectables + Epic quality floor
+
+Scope cut applied in the single classifier `GameObject.ST_AutoTagCategory` (both the sweep and the hover channel inherit it):
+
+- **ENEMY category removed entirely.** The whole alive safe-to-attack puppet branch (IsHostile / IsCharacterCyberpsycho / DoNotTriggerPrevention / prevention-mirror / IsEnemy / CanBeTagged) is gone, along with the separate LOS/any-range enemy sweep `ST_RunEnemySweepOnce`, its `ST_SweepTick` call, and the `AutoTagEnemyRange` config. No NPC/enemy is auto-tagged anymore. The enum collapses to `STAutoTagCategory { None, Other }`.
+- **ACCESS-POINT and TURRET categories removed.** The `IsAccessPoint` and `IsTurret` branches are deleted. Only lootable corpses and loot-bearing world objects (containers/shards/items) can classify `Other`.
+- **Epic quality floor added.** Both collectable cases are now gated so they tag only when their MAX item quality is ≥ `AutoTagQualityFloor` (default `gamedataQuality.Epic` = Tier 4). Helpers `ST_LootMeetsQualityFloor` (max over `GetItemList`, plus a bare-`ItemObject.GetItemData` fallback) + `ST_QualityTier` (explicit quality→tier switch, NOT `EnumInt`: `gamedataQuality` raw ints are non-monotonic — Epic=2, Rare=9, Invalid=14 — and NOT `RPGManager.ItemQualityEnumToValue`, which collapses EpicPlus/LegendaryPlus/Iconic to 0). EpicPlus/LegendaryPlus/LegendaryPlusPlus/Iconic all pass; Rare/Uncommon/Common/Invalid do not.
+- **Side effect (intended):** shards and Common/Uncommon/Rare junk corpses/containers below Epic no longer auto-tag. Below-floor / empty-now stays transient (no seen-list append), so a container that streams its loot in later is re-checked. Floor is user-editable via `AutoTagQualityFloor` (lower to `gamedataQuality.Rare` for Tier 3+).
+
+## 2026-07-11 — entity-list pass: tag enemy-dropped floor weapons
+
+Enemy weapon drops were never auto-tagged because they are invisible to BOTH existing channels (all VERIFIED against a fresh `CDPR-Modding-Documentation/Cyberpunk-Scripts` clone):
+
+- A dropped weapon spawns as a visual `ItemObject` + connected `gameItemDropObject` holding the actual inventory (`cyberpunk/items/item.script:16-17`). Neither carries a TargetingComponent → the frustum sweep (`GetTargetParts`) never returns them.
+- Neither publishes `UI_Scanner.ScannedObject` (plain loot never "focuses") → the hover channel never sees them either.
+- Classification needed NO change: `gameItemDropObject extends gameLootObject extends GameObject` (`inventoryComponent.script:147/238`), its `IsContainer()` returns `!IsEmpty()` (`inventoryComponent.script:382`) → a loot-bearing drop already passes the collectables whitelist; `CanBeTagged()` defaults true (`gameObject.script:1997`, no loot-class override).
+
+Fix: `ST_RunEntityListSweepOnce` on `HUDManager` — a `GameInstance.GetEntityList` pass (same crash-safe game-thread pattern as the F2 auto-loot channel) sub-gated onto the 0.35 s sweep tick by an accumulator (`m_stEntityListAccum`, cadence `AutoTagEntityListInterval` = 1.0 s, F2's safe envelope). Per entity: cheap distance-reject to `AutoTagSweepRange` (50 m) → `APS_ResolveLootTarget` folds the bare `ItemObject` into its drop (one tag per weapon, no double) → seen-check FIRST (skips the classifier's `GetItemList` on already-tagged ids) → camera-forward dot backstop (same "in front, not behind" semantics as the frustum sweep) → shared `ST_AutoTagCategory` whitelist → `AutoTagTryOnce`. Bonus coverage: standalone containers/shard cases without TargetingComponents in the 50 m sphere now tag too (previously hover-only). Probe extended: `DebugProbeAutoTagSweep` also logs `ST entity-list: entities=N tagged=M`. Validated with serial `scc -compile` (clean).
+
+## 2026-07-12 — quality-less loot (materials / junk / broken weapons) now tags
+
+**Bug (user report):** enemy drops that are crafting **materials** or a **broken weapon** never got a tag marker, while normal weapon/gear drops did.
+
+**Root cause:** `ST_LootMeetsQualityFloor` ended in `bestTier >= floorTier`. Quality-less items carry no usable Quality stat, so `RPGManager.GetItemDataQuality` returns `Random`/`Invalid` and `ST_QualityTier` maps them to the `default` → **tier 0**, which is BELOW the Common floor (tier 1). This was already noted (and accepted as "sensibly not tagged") in the 2026-07-07 refinements entry — it is exactly the class of loot the user wants tagged. `CanBeTagged()` is NOT the culprit: it defaults true on `GameObject` (`gameObject.script:1997`) and only `ScriptedPuppet` overrides it, so the vanilla tag path never rejected these drops.
+
+**Fix:** `ST_LootMeetsQualityFloor` now separates "**has loot**" from "**loot is good enough**":
+- Track `hasLoot` while scanning `GetItemList` (defined entries only), with the unchanged bare-`ItemObject.GetItemData()` fallback when the list is empty.
+- No loot at all → `false`, still **transient** (no seen-list append; a container that streams loot in later is re-checked).
+- `floorTier <= 1` (the default Common floor) → `true` for ANY loot-bearing target, **tier 0 included** → materials, junk and broken/quality-less weapons tag.
+- The `bestTier >= floorTier` compare only bites when the user raises `AutoTagQualityFloor` above Common (there, dropping unresolved-quality junk is the intent).
+
+Reach was already fine: enemy floor drops are picked up by the entity-list pass (2026-07-11) — they were being classified and then rejected by the quality gate. Validated with serial `scc -compile` (clean).
+
+## 2026-07-13 — Auto-tag: normal-mode (always-on) + LOS-gated
+
+Two user asks, both implemented: (1) auto-tag now works in NORMAL gameplay, not only while the scanner is up; (2) a tag is applied ONLY when the player has line of sight to the target.
+
+**Always-on arming (scanner gate retired):**
+- The sweep loop is now armed once per load from the `PlayerPuppet.OnGameAttached` wrap — the exact pattern the always-on auto-loot loop already uses (player object attaching = game thread, once per load; `m_stSweepArmed` double-arm guard keeps replacer re-attaches idempotent). `HUDManager` is a `ScriptableSystem` (`hudManager.script:162,174`) resolved via `GameObject.GetHudManager()` (`gameObject.script:3183`); the ScriptableSystemsContainer is live during this very event (vanilla queues `PlayerAttachRequest` to it there, `player.script:1170`), so the handle is valid at arm time (IsDefined-guarded anyway).
+- The `OnScannerUIVisibleChanged` wrap no longer arms anything — it is a pure Feature-1 (loot-while-scanning) hook again. RETIRED, not kept as a fallback: with the attach-arming reliable, a second arm site is redundant (the guard would make it harmless but dead code).
+- `ST_SweepTick` lifecycle reworked: the `!m_uiScannerVisible` stop and the `ActiveMode.FOCUS` gate are GONE (the loop never stops except the static config toggle, and sweeps run in normal mode, scan mode and with the QH panel up alike). Two hardenings ported from `APS_LootLoopTick`: FAULT-PROOF RE-ARM (successor tick scheduled FIRST, before any sweep work — with the scanner-open re-arm gone, a mid-tick fault would otherwise kill the feature for the session) and replacer/braindance tick skip (`GetPlayer()`/`IsReplacer`/`IsBraindanceActive`, loop stays alive).
+- `AutoTagFirstTickDelay` (0.1 s) survives as the settle delay between player attach and the first sweep; its old scanner-open FOCUS-race rationale died with the FOCUS gate.
+
+**LOS gate (uniform, all tag channels):**
+- `GameInstance.GetTargetingSystem(game).IsVisibleTarget(player, target)` (native import, `targetingSystem.script:119`; same call the auto-pickup worker already runs on these exact loot classes — containers/drops/corpses return sane results, see scanner-suite-refinements.md) is now required before `AutoTagTryOnce` in ALL THREE channels: the frustum sweep (`ST_RunSweepOnce`), the entity-list pass (`ST_RunEntityListSweepOnce`), and the `OnScannedObjectChanged` hover complement. The frustum query itself still enumerates through walls (`TargetingSet.Frustum` does no occlusion test) — occlusion is enforced per candidate at tag time.
+- Gate ordering keeps the raycast cheap: classify + seen-check first (they reject almost everything), `IsVisibleTarget` last, only for real candidates. An occluded candidate spends NOTHING (no seen-list append) — it stays eligible and tags on a later tick the moment LOS clears.
+- This SUPERSEDES the removed 2026-07-06 enemy category's old LOS special case — the LOS rule is uniform across every tagged class now.
+- Known accepted limitation (user spec: LOS-only regardless): `IsVisibleTarget` has documented FALSE NEGATIVES (ragdolled-corpse body-part probes clipping into floor/cover, tiny floor-item volumes, closed container lids — the same ones the auto-loot two-tier design absorbs with its 4 m bubble). Such a target may tag late or only from another angle/up close. No tagged class is structurally LOS-incapable: everything the whitelist can pass (corpses = ScriptedPuppet; containers/shard cases; gameItemDropObject via APS_ResolveLootTarget) goes through the same IsVisibleTarget call the pickup worker already uses successfully on them.
+
+**Config truth after this change:**
+- `EnableAutoTag` = true (RENAMED from `EnableAutoTagOnScan` — the old name lied about an always-on loop)
+- `AutoTagSweepRange` = 100.0 m, `AutoTagSweepInterval` = 1.0 s, `AutoTagFirstTickDelay` = 0.1 s (after attach), `AutoTagEntityListInterval` = 1.0 s, `AutoTagQualityFloor` = Common, `DebugProbeAutoTagSweep` = false — all unchanged in value.
+
+**Pending in-game tests:** loot tags in normal mode without ever opening the scanner (walk into a loot room and look around); loot behind a wall does NOT tag until LOS clears (then tags automatically); scan mode still tags as before (always-on covers it); hover-tag in scanner still works; a clipped visible corpse tagging late = the known false negative, accepted; replacer (Johnny) and braindance sections tag nothing; long-session stability (loop survives faults thanks to re-arm-first); no worker-thread crash regression (driving / fast-travel / district transitions).
+
+Validated with serial `scc -compile`: "Compilation complete", no new warnings (only the known pre-existing ones from other mods).

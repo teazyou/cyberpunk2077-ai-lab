@@ -1,0 +1,43 @@
+package stims
+using RTDB
+
+GunshotStimuli : Stim
+{
+	float radius = 50; // was 30
+	bool isReactionStim = true;
+	float fear = 0;
+	float aggressive = 0;
+	tags = 
+	[
+		"PanicFear", "CrowdReaction", "TrafficPlayerOnly", "Alert"
+	];
+	propagation = "StimTypes.Audio";
+	priority = "StimTypes.High";
+	fk< StimType > type = "StimTypes.Gunshot";
+	fk< StimTargets > targets = "StimTypes.All";
+}
+
+SilencedGunshotStimuli : GunshotStimuli
+{
+	float radius = 8;
+	float aggressive = 0;
+	float fear = 10;
+	propagation = "StimTypes.Audio";
+	priority = "StimTypes.High";
+	fk< StimType > type = "StimTypes.SilencedGunshot";
+}
+
+ExplosionStimuli : Stim
+{
+	float radius = 50; // was 25
+	bool isReactionStim = true;
+	float fear = 0;
+	float aggressive = 0;
+	tags = 
+	[
+		"PanicFear", "UnknownThreat", "CrowdReaction", "NonAggressiveCrowd"
+	];
+	propagation = "StimTypes.Audio";
+	priority = "StimTypes.High";
+	fk< StimType > type = "StimTypes.Explosion";
+}

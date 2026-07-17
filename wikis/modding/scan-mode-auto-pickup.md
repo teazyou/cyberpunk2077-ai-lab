@@ -119,3 +119,57 @@ All viable paths are single-`.reds` mods → `mods/enabled/r6-scripts/`, fully m
 - Nexus pages (via r.jina.ai): [Autoloot 5202](https://www.nexusmods.com/cyberpunk2077/mods/5202), [Completely Non-Manual Looting 16040](https://www.nexusmods.com/cyberpunk2077/mods/16040), [Better Loot Markers 3486](https://www.nexusmods.com/cyberpunk2077/mods/3486), [Looting QoL 14730](https://www.nexusmods.com/cyberpunk2077/mods/14730), [Nearby bodies don't disappear 11053](https://www.nexusmods.com/cyberpunk2077/mods/11053), [AlmostAutoLoot 1886](https://www.nexusmods.com/cyberpunk2077/mods/1886)
 - Sibling dossiers in this vault: [scan-mode-looting.md](scan-mode-looting.md), [scan-mode-auto-tagging.md](scan-mode-auto-tagging.md)
 - Cross-reference: https://nativedb.red4ext.com (not needed beyond decompiled sources this pass)
+
+---
+
+## 2026-07-06 — radius channel aborted; cursor pickup LOS-gated
+
+Two changes shipped to `ScannerSuite.reds` (compiles clean, zero custom-scanner-suite warnings):
+
+- **RADIUS auto-pickup channel REMOVED (aborted).** The 360°-around-player corpse-vacuum channel (`EnableAutoPickupRadius` / `AutoPickupRadius` config + `APS_RunRadiusPickup`, enumerating via `GameObject.GetEntitiesAroundObject`) is deleted entirely. Rationale: world containers / dropped items / shard cases carry **no `TargetingComponent`**, so no crash-safe proximity/frustum query can enumerate them through walls (VERIFIED — targeting queries only return puppets/devices). Radius therefore only ever worked on corpses, which the cursor channel already collects on look-at/hover — the channel added nothing and is gone. (Its even-earlier `OnGameAttached` registry incarnation had already been removed as the worker-thread heap-corruption crash fix — see scanner-suite-crash-analysis.md; do NOT re-add any entity-attach hook.)
+- **CURSOR pickup now REQUIRES line of sight.** Per this dossier's own "Filters & safety" LOS recommendation and the scanner-suite-refinements Refinement 2 "KEEP `IsVisibleTarget`" verdict: (1) detection switched from the no-LOS `GetLookAtObject(this, false)` to the LOS-respecting `GetLookAtObject(this, true, true)` — matching vanilla's own scanner-tag crosshair path `focusModeTagging.swift:205` (`GetLookAtObject(owner, true, true)`); (2) the shared worker `APS_TryAutoPickup` re-checks `TargetingSystem.IsVisibleTarget(player, target)` after the 40 m range gate (transient refusal if occluded). Net: with the scanner up, only loot you can actually SEE within 40 m is auto-picked — never loot behind walls/floors. `AutoPickupMaxDistance` unchanged (40.0).
+
+## 2026-07-12 — RADIUS (360°) auto-pickup channel RE-ACTIVATED at 10 m
+
+`EnableConstantAutoLoot()` `false` → **`true`**. The F2 surroundings channel (the modern radius channel — `APS_RunSurroundingsPickup`, `GameInstance.GetEntityList` enumeration on the game thread) is now ON, so loot within **10 m** in any direction is vacuumed every ~1.0 s (`ConstantAutoLootInterval`), in and out of scan mode, with no crosshair involvement.
+
+- **Range = 10 m already, no numeric edit needed**: the channel pre-filters on the SHARED `AutoPickupMaxDistance()` = 10.0 (set in the entry below), which is also the worker's own gate. Cursor and radius therefore both reach exactly 10 m.
+- **Not the aborted radius channel.** The 2026-07-06 abort (note above) killed the *TargetingComponent-based* radius pass, which structurally could not see containers/drops/shard cases. This one enumerates the raw world entity list, so it covers ALL loot classes. The forbidden per-entity `GameObject.OnGameAttached` streaming hook (heap-corruption crash) is NOT involved and stays absent.
+- **LOS**: containers + shard cases still require `IsVisibleTarget` (no through-wall vacuum); corpses + floor items stay LOS-exempt (their occlusion query is unreliable — see 2026-07-07 entry). Shared ledger + shared worker with the cursor channel, so no double-loot.
+- Config toggle + doc-comments only; no logic change. Validated with serial `scc -compile` (clean; only the 4 pre-existing WARNs from other mods).
+
+## 2026-07-12 — cursor (mouseover) pickup range 6 m → 10 m
+
+`AutoPickupMaxDistance()` 6.0 → **10.0** per user spec. It is the SHARED gate: the cursor/look-at channel's only reach limit (that channel ignores LOS), and the upstream distance pre-filter of the F2 360° surroundings pass (`EnableConstantAutoLoot`, off by default) — so both now reach 10 m. Config + doc-comments only; no logic change. Validated with serial `scc -compile` (clean).
+
+## 2026-07-13 — TWO-TIER LOS for the 360° channel: 12 m LOS-required / 4 m no-LOS
+
+Replaces the flat 6 m all-channels `ignoreLOS=true` bubble (set earlier the same day, not logged
+here) per user spec: *"keep LOS for 12 m; the inner 4 m no-LOS exists to pick what the LOS query
+wrongly refuses — no vacuuming behind walls; the mod accelerates looting, it does not acquire what
+is not accessible."*
+
+- **Same loop, no new machinery**: `APS_RunSurroundingsPickup` already computed `Vector4.Distance`
+  per entity before calling the worker — the distance is now computed once into a local and reused
+  as the tier selector: `APS_TryAutoPickup(this, d <= AutoPickupNoLOSRange())`.
+- **Config**: `AutoPickupMaxDistance()` 6.0 → **12.0** (outer, LOS-gated, still the shared worker
+  gate for every channel) + NEW `AutoPickupNoLOSRange()` = **4.0** (inner bubble, 360° channel only).
+- **Worker LOS gate re-armed for ALL loot classes**: `losExempt = ignoreLOS || IsDefined(puppet) ||
+  this.IsItem()` → plain `!ignoreLOS`. The blanket corpse/floor-item class exemption is GONE — it
+  existed because `IsVisibleTarget` false-negatives (ragdolled corpse body-part probes clipping into
+  floor/cover — the "some corpses never loot" bug; tiny floor-item volumes) made LOS a never-clearing
+  transient, but it also meant vacuuming corpses through walls at full range. The 4 m no-LOS bubble
+  is the new absorber for those false negatives: whatever the 12 m LOS tier wrongly refuses stays a
+  transient refusal (no ledger spend) and is collected on approach.
+- **Cursor + hover channels aligned** (both OFF via `EnableAutoPickupCursor()=false`, changed for
+  policy consistency if re-enabled): look-at back to the LOS form `GetLookAtObject(this, true, true)`
+  (`focusModeTagging.swift:205`), both call sites pass `ignoreLOS=false`.
+- Semantics: occluded loot in the 4–12 m ring is re-checked every ~0.5 s pass and collected the
+  moment LOS clears OR the player closes inside 4 m. Closed-lid containers whose lid eats the ray
+  are the third false-negative class the bubble covers.
+- Validated with serial `scc -compile` (clean; only the pre-existing WARNs from other mods).
+- PENDING in-game: visible container/corpse at ~8–10 m auto-loots; loot behind a wall at 8 m does
+  NOT (until approached within 4 m or seen); corpse false-negative check — a body in the open
+  beyond 4 m should still loot (IsVisibleTarget usually passes for un-clipped bodies; if a visible
+  corpse repeatedly refuses until 4 m, that is the known probe-clipping false negative, working as
+  designed).

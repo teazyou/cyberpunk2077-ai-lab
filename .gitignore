@@ -1,4 +1,19 @@
 .DS_Store
 
-# Exceeds GitHub's 100 MB file limit (1.0 GB) — re-download from Nexus mod 7652 if needed
+# Exceed GitHub's 100 MB file limit — re-download from Nexus if needed.
+# 1.0 GB, mod 7652
 mods/downloaded/cyberpunk-2077-hd-reworked-project.zip
+# 1.4 GB, mod 7089
+mods/downloaded/high-res-unnamed-npc-faces.7z
+# 1.3 GB, mod 14999
+mods/downloaded/high-res-named-npcs-aio.7z
+# 192 MB, mod 10237
+mods/downloaded/panam-reimagined.zip
+# 112 MB, mod 1663
+mods/downloaded/misty-alternate-clothes-and-nudes.zip
+
+# Third-party clone of CDPR's Cyberpunk-Scripts (has its own .git) — re-clone, never vendor
+sprint/vanilla-scripts/
+
+# Derived: redscript compile cache, logs, and staged copies of deployed mods
+sprint/staging/
