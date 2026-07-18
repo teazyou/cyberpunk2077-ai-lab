@@ -221,10 +221,21 @@ public func ShouldIgnoreCombatStim(stimType: gamedataStimType, instigator: wref<
     danger = AggroRangeConfig.VanillaDangerRange();
   };
   nearDanger = this.IsTargetPositionClose(sourcePos, danger);
+  // LOS GATE (bugfix): the widened 12->35 m band applies only to a player this
+  // NPC can actually SEE — IsTargetVisible (reactionComponent.script:5409, the
+  // same primitive vanilla's police combat branch gates on at :2564). Inside
+  // vanilla's own 12 m the no-LOS reaction is vanilla behavior and is kept.
+  let nearVanillaDanger: Bool = this.IsTargetPositionClose(sourcePos, AggroRangeConfig.VanillaDangerRange());
+  let sourceSeen: Bool = this.IsTargetVisible(source);
+  if en && nearDanger && !nearVanillaDanger && !sourceSeen {
+    nearDanger = false;
+  };
 
   // D2 — Explosion: never ignorable when enabled (drop the inDanger conjunct);
-  // vanilla requires it in range.
-  if Equals(stimType, gamedataStimType.Explosion) && (en || nearDanger) {
+  // vanilla requires it in range. LOS GATE (bugfix): beyond vanilla's 12 m the
+  // never-ignorable rule now also requires this NPC to SEE the player
+  // (sourceSeen); inside 12 m vanilla's own no-LOS reaction is preserved.
+  if Equals(stimType, gamedataStimType.Explosion) && (nearVanillaDanger || (en && sourceSeen)) {
     if log {
       this.LogInfo("can't be ignored - explosion nearby");
     };
@@ -337,14 +348,22 @@ private func ShouldHelpTargetFromSameAttitudeGroup(target: wref<GameObject>, tar
     };
   };
 
-  // D6 — the load-bearing line. Enabled: any defined target grants help (the
-  // "unless it is the player" exemption is gone). Disabled: vanilla exemption.
+  // D6 — the load-bearing line. Enabled: any defined target grants help; for a
+  // PLAYER target the helper must additionally SEE the player right now —
+  // LOS GATE (bugfix): IsTargetVisible (reactionComponent.script:5409). An
+  // unseen player keeps the vanilla exemption (fall through — no help; vanilla
+  // :5793-5802 falls through to the police branch then returns false).
+  // Disabled: vanilla exemption.
   if en {
     if IsDefined(targetOfTarget) {
       if targetOfTarget.IsPlayer() {
-        this.EOAR_Note("EO aggro: ally joins vs player");
+        if this.IsTargetVisible(targetOfTarget) {
+          this.EOAR_Note("EO aggro: ally joins vs player");
+          return true;
+        };
+      } else {
+        return true;
       };
-      return true;
     };
   } else {
     if IsDefined(targetOfTarget) && !targetOfTarget.IsPlayer() {

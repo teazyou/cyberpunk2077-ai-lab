@@ -2,18 +2,23 @@ module EnemyOverhaul.Duplication
 import EnemyOverhaul.Common.*
 
 // =============================================================================
-// Enemy Overhaul — F2 enemy-duplication (20% extra spawn)
+// Enemy Overhaul — F2 enemy-duplication (40% extra spawn)
 // Locally-authored custom mod (no Nexus source). macOS / Steam / pure REDscript
 // / game v2.3. One of three feature units under slug `custom-enemy-overhaul`;
 // consumes the shared substrate `EnemyOverhaul.Common.*` (eligibility filter,
 // clone registry, seen-set helpers, notify funnel).
 //
 // WHAT IT DOES: on a self-re-arming game-thread sweep, each eligible combat
-// human near the player gets ONE 20% roll; on success an extra hostile enemy is
-// spawned nearby that fights immediately and pays NO XP / drops NO loot. Depth
-// is capped at 1 (a clone never duplicates) — clones are registered in Common's
-// registry and skipped before the roll gate, yet stay eligible for F1's own
-// single uprank roll.
+// human near the player gets ONE 40% roll; on success an extra enemy is spawned
+// nearby that pays NO XP / drops NO loot. If the player is IN COMBAT at wiring
+// time the clone is forced hostile and fights immediately; a clone minted next
+// to a passive player spawns peaceful (source attitude group only) and aggros
+// through vanilla senses/faction rules — walking past enemies never starts a
+// fight (combat gate 2026-07-17). Depth
+// is capped at 1 (a clone never duplicates — the clone gate precedes the roll
+// gate) — clones are registered in Common's registry and skipped there, yet
+// stay eligible for F1's own single uprank roll (user-confirmed 2026-07-17:
+// clones may rank up, but can never be cloned again).
 //
 // POSTURE B (experimental spawn path, per plan-enemy-duplication + search_index
 // F2). The ONLY script-callable by-record spawn primitive on this platform is
@@ -50,7 +55,7 @@ import EnemyOverhaul.Common.*
 //
 // ADDENDUM 2026-07-17 — dup-processed +10% max-HP bonus: every enemy this
 // feature PROCESSES gets one extra multiplicative max-HP buff, exactly once per
-// entity per session, regardless of its 20% roll outcome. "Processed" = (a)
+// entity per session, regardless of its 40% roll outcome. "Processed" = (a)
 // each SOURCE at its once-per-entity spend-on-roll moment in
 // EODup_ProcessCandidate (before the roll — outcome-independent), and (b) each
 // spawned CLONE at its deferred wiring moment in EODup_WireClone (clones never
@@ -77,7 +82,7 @@ public abstract class EODuplicationConfig {
   public final static func DuplicationEnabled() -> Bool { return true; }
 
   // Once-per-source probability of spawning one extra enemy.
-  public final static func DuplicateChance() -> Float { return 0.20; }
+  public final static func DuplicateChance() -> Float { return 0.40; } // 0.20 -> 0.40 (2026-07-17, user request)
 
   // false = verbatim clone of the source record (v1 default, recommended by the
   // wiring dossier). true = PREFERRED same-faction curated pool: each pick is
@@ -318,7 +323,7 @@ public final func EODup_ProcessCandidate(player: ref<PlayerPuppet>, npc: ref<NPC
   // a placement or spawn failure never refunds the roll (FIFO cap = LedgerCap()).
   EO_SeenTryAdd(this.m_eodupRollSeen, id, EODuplicationConfig.LedgerCap());
   // addendum 2026-07-17: dup-processed HP bonus — THE once-per-entity processing
-  // moment for SOURCES. Positioned before the roll below, so a failed 20% roll
+  // moment for SOURCES. Positioned before the roll below, so a failed 40% roll
   // still buffs (outcome-independent). Exactly-once via the dedicated HP ledger
   // inside (safe against re-entry; clones never reach here — clone gate above).
   this.EODup_ApplyHpBonus(npc);
@@ -623,26 +628,36 @@ public final func EODup_WireClone(clone: ref<ScriptedPuppet>, sourceId: EntityID
       cloneAgent.SetAttitudeGroup(srcAgent.GetAttitudeGroup());
     };
   };
-  // ALWAYS hostile toward the player (spawned NPCs do NOT inherit hostility —
-  // vanilla proof dynamicSpawnSystem.script:42-56).
-  if IsDefined(player) && IsDefined(cloneAgent) {
-    let playerAgent: ref<AttitudeAgent> = player.GetAttitudeAgent();
-    if IsDefined(playerAgent) {
-      cloneAgent.SetAttitudeTowards(playerAgent, EAIAttitude.AIA_Hostile);
+  // COMBAT GATE (2026-07-17, user request): the forced hostility/threat wiring
+  // below runs ONLY while the player is already fighting (PlayerPuppet.IsInCombat,
+  // vanilla senseComponent.script:858 idiom) — a clone minted next to a PASSIVE
+  // player spawns peaceful with its source's attitude group and aggros later
+  // strictly through vanilla senses/faction rules. No auto-aggro from walking by.
+  let playerFighting: Bool = IsDefined(player) && player.IsInCombat();
+  if playerFighting {
+    // ALWAYS hostile toward the player (spawned NPCs do NOT inherit hostility —
+    // vanilla proof dynamicSpawnSystem.script:42-56).
+    if IsDefined(cloneAgent) {
+      let playerAgent: ref<AttitudeAgent> = player.GetAttitudeAgent();
+      if IsDefined(playerAgent) {
+        cloneAgent.SetAttitudeTowards(playerAgent, EAIAttitude.AIA_Hostile);
+      };
     };
-  };
-  // combat-threat injection = "fight immediately" (verbatim vanilla recipe,
-  // dynamicSpawnSystem.script:18-40; human-gated inside SendCommand = matches
-  // our humans-only eligibility for free).
-  let cmd: ref<AIInjectCombatThreatCommand> = new AIInjectCombatThreatCommand();
-  let emptyNames: array<CName>;
-  let playerRef: String = "#player";
-  cmd.targetPuppetRef = CreateEntityReference(playerRef, emptyNames);
-  cmd.duration = EODuplicationConfig.CloneThreatDuration();
-  AIComponent.SendCommand(clone, cmd);
-  // optional secondary hostility channel.
-  if EODuplicationConfig.CloneUseCombatStimFallback() && IsDefined(player) {
-    StimBroadcasterComponent.SendStimDirectly(player, gamedataStimType.CombatHit, clone);
+    // combat-threat injection = "fight immediately" (verbatim vanilla recipe,
+    // dynamicSpawnSystem.script:18-40; human-gated inside SendCommand = matches
+    // our humans-only eligibility for free).
+    let cmd: ref<AIInjectCombatThreatCommand> = new AIInjectCombatThreatCommand();
+    let emptyNames: array<CName>;
+    let playerRef: String = "#player";
+    cmd.targetPuppetRef = CreateEntityReference(playerRef, emptyNames);
+    cmd.duration = EODuplicationConfig.CloneThreatDuration();
+    AIComponent.SendCommand(clone, cmd);
+    // optional secondary hostility channel.
+    if EODuplicationConfig.CloneUseCombatStimFallback() {
+      StimBroadcasterComponent.SendStimDirectly(player, gamedataStimType.CombatHit, clone);
+    };
+  } else {
+    this.EODup_Notify("wire passive (player not in combat) clone=" + EntityID.ToDebugString(clone.GetEntityID()));
   };
   let grp: CName;
   if IsDefined(cloneAgent) {
